@@ -5,177 +5,67 @@ import sqlite3
 import socket
 import uuid
 import datetime
+from sqlalchemy.orm import Session
+from Database import Vehicle, Session as DBSession, Location, get_db_session
 
 class Database:
-    def __init__(self, path):
-        self.path = path
-        self._init_tables()
+    def __init__(self):
+        self.session = get_db_session()
 
-    def _init_tables(self):
-        self._log("Ensuring tables exist")
-        conn = None
-        try:
-            conn = sqlite3.connect(self.path)
-            self._log("Connected to SQLite")
-            cur = conn.cursor()
+    def vehicle_exists(self, vehicle_id: str) -> bool:
+        return self.session.query(Vehicle).filter_by(vehicle_id=vehicle_id).first() is not None
 
-            self._init_vehicles(conn, cur)
-            self._init_sessions(conn, cur)
-            self._init_locations(conn, cur)
+    def vehicle_password_correct(self, vehicle_id: str, password: str) -> bool:
+        vehicle = self.session.query(Vehicle).filter_by(vehicle_id=vehicle_id, vehicle_password=password).first()
+        return vehicle is not None
 
-        except sqlite3.Error as e:
-            self._log(f"Error during database initialization: {e}")
-        finally:
-            if conn:
-                conn.close()
-                self._log('SQLite connection closed')
-
-    def _init_vehicles(self, conn, cursor):
-        self._log('Initializing table: vehicles')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS vehicles (
-        vehicle_id TEXT PRIMARY KEY,
-        vehicle_password TEXT,
-        vehicle_type TEXT NOT NULL,
-        status TEXT NOT NULL
-        )''')
-        conn.commit()
-        self._log('Vehicles initialized!')
-
-    def _init_sessions(self, conn, cursor):
-        self._log('Initializing table: sessions')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS sessions (
-        session_id TEXT PRIMARY KEY,
-        vehicle_id TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-        )''')
-        conn.commit()
-        self._log('Sessions initialized!')
-
-    def _init_locations(self, conn, cursor):
-        self._log('Initializing table: locations')
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS locations (
-        location_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        vehicle_id TEXT NOT NULL,
-        longitude REAL NOT NULL,
-        latitude REAL NOT NULL,
-        timestamp TEXT NOT NULL DEFAULT current_timestamp
-        )''')
-        conn.commit()
-        self._log('Locations initialized!')
-
-    @staticmethod
-    def _log(message):
-        print("DB | "+message)
-
-    @staticmethod
-    def vehicle_exists(cursor, vehicle_id: str) -> bool:
-        cursor.execute('SELECT EXISTS(SELECT 1 FROM vehicles WHERE vehicle_id = ?)', (vehicle_id,))
-        result = cursor.fetchone()
-        return result is not None and result[0] > 0
-
-    @staticmethod
-    def vehicle_password_correct(cursor, vehicle_id: str, password: str) -> bool:
-        cursor.execute('SELECT EXISTS(SELECT 1 FROM vehicles WHERE vehicle_id = ? AND vehicle_password = ?)', (vehicle_id, password))
-        return cursor.fetchone() is not None
-
-    @staticmethod
-    def create_session(conn, cursor, vehicle_id: str) -> str:
+    def create_session(self, vehicle_id: str) -> str:
         session_id = str(uuid.uuid4())
-        expires_at_dt = datetime.datetime.now() + datetime.timedelta(hours=1)
-        expires_at_ts = int(expires_at_dt.timestamp())
+        expires_at = datetime.datetime.now() + datetime.timedelta(hours=1)
+        new_session = DBSession(session_id=session_id, vehicle_id=vehicle_id, expires_at=expires_at)
+        self.session.add(new_session)
+        self.session.commit()
+        return session_id
+
+    def validate_session(self, session_id: str, expected_vehicle_id: str) -> tuple[bool, str]:
+        db_session = self.session.query(DBSession).filter_by(session_id=session_id).first()
+        if not db_session:
+            return False, "INVALID_SESSION"
+
+        if db_session.vehicle_id != expected_vehicle_id:
+            return False, "INVALID_SESSION"
+
+        if datetime.datetime.now() > db_session.expires_at:
+            return False, "SESSION_EXPIRED"
+
+        return True, "VALID"
+
+    def record_location(self, vehicle_id: str, longitude: float, latitude: float) -> bool:
         try:
-            cursor.execute('''
-            INSERT INTO sessions (session_id, vehicle_id, expires_at)
-            VALUES (?, ?, ?)
-            ''', (session_id, vehicle_id, expires_at_ts))
-            conn.commit()
-            Database._log(f"Created session {session_id} for {vehicle_id} expiring at {expires_at_dt}")
-            Database._log(session_id)
-            return session_id
-        except sqlite3.Error as e:
-            Database._log(f"Error creating session for {vehicle_id}: {e}")
-            conn.rollback()
-            return ""
-
-    @staticmethod
-    def validate_session(cursor, session_id: str, expected_vehicle_id: str) -> tuple[bool, str]:
-        if not session_id:
-            return False, "SESSION_ID_MISSING"
-
-        try:
-            cursor.execute("SELECT vehicle_id, expires_at FROM sessions WHERE session_id = ?", (session_id,))
-            result = cursor.fetchone()
-
-            if not result:
-                Database._log(f"Session validation failed: Session ID '{session_id}' not found.")
-                return False, "INVALID_SESSION"
-
-            actual_vehicle_id, expires_at_ts = result
-
-            if actual_vehicle_id != expected_vehicle_id:
-                Database._log(
-                    f"Session validation failed: Mismatch for session '{session_id}'. Expected '{expected_vehicle_id}', found '{actual_vehicle_id}'.")
-                return False, "INVALID_SESSION"
-
-            current_time_ts = int(datetime.datetime.now().timestamp())
-            if current_time_ts > expires_at_ts:
-                Database._log(
-                    f"Session validation failed: Session '{session_id}' for vehicle '{expected_vehicle_id}' expired at {datetime.datetime.fromtimestamp(expires_at_ts)}.")
-                return False, "SESSION_EXPIRED"
-
-            Database._log(f"Session validation successful for session '{session_id}', vehicle '{expected_vehicle_id}'.")
-            return True, "VALID"
-
-        except sqlite3.Error as e:
-            Database._log(f"Database error during session validation for '{session_id}': {e}")
-            return False, "DB_ERROR"
+            new_location = Location(vehicle_id=vehicle_id, longitude=longitude, latitude=latitude)
+            self.session.add(new_location)
+            self.session.commit()
+            return True
         except Exception as e:
-            Database._log(f"Unexpected error during session validation for '{session_id}': {e}")
-            return False, "UNEXPECTED_ERROR"
-
-    @staticmethod
-    def record_location(conn, cursor, vehicle_id: str, longitude: float, latitude: float) -> bool:
-        try:
-            cursor.execute('''
-                   INSERT INTO locations (vehicle_id, longitude, latitude)
-                   VALUES (?, ?, ?)
-               ''', (vehicle_id, longitude, latitude))
-            conn.commit()
-            Database._log(f"Recorded location for {vehicle_id}: ({longitude}, {latitude})")
-            return True
-        except sqlite3.Error as e:
-            Database._log(f"Error recording location for {vehicle_id}: {e}")
-            conn.rollback()
+            self.session.rollback()
+            print(f"Error recording location: {e}")
             return False
 
-    @staticmethod
-    def register_vehicle(conn, cursor, vehicle_id: str, vehicle_password: str, vehicle_type: VehicleType):
-        status = "IDLE"
+    def register_vehicle(self, vehicle_id: str, vehicle_password: str, vehicle_type: str) -> bool:
         try:
-            cursor.execute('''
-                INSERT INTO vehicles (vehicle_id, vehicle_password, vehicle_type, status)
-                VALUES (?, ?, ?, ?)
-            ''', (vehicle_id, vehicle_password, vehicle_type.value, status))
-            conn.commit()
-            Database._log(f"Registered vehicle {vehicle_id}")
+            new_vehicle = Vehicle(vehicle_id=vehicle_id, vehicle_password=vehicle_password, vehicle_type=vehicle_type)
+            self.session.add(new_vehicle)
+            self.session.commit()
             return True
-        except sqlite3.IntegrityError:
-            Database._log(f"Vehicle {vehicle_id} already exists (IntegrityError).")
-            return False
-        except sqlite3.Error as e:
-            Database._log(f"Error registering vehicle {vehicle_id}: {e}")
-            conn.rollback()
+        except Exception as e:
+            self.session.rollback()
+            print(f"Error registering vehicle: {e}")
             return False
 
 
 class TransitSystem:
-    def __init__(self, db_path: str, port: int):
-        self.db_path = db_path
-        Database(self.db_path)
-
+    def __init__(self, port: int):
+        self.db = Database()  # Use the SQLAlchemy-based Database class
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind(('0.0.0.0', port))
         self.socket.listen(5)
@@ -185,7 +75,7 @@ class TransitSystem:
 
     def _log(self, *args):
         msg = " ".join(map(str, args))
-        print('Server | '+msg)
+        print('Server | ' + msg)
 
     def start(self):
         self.running = True
@@ -193,7 +83,7 @@ class TransitSystem:
             while self.running:
                 try:
                     conn, addr = self.socket.accept()
-                    client_thread = threading.Thread(
+                    threading.Thread(
                         target=self.handle_client, args=(conn, addr), daemon=True
                     ).start()
                 except socket.timeout:
@@ -215,11 +105,7 @@ class TransitSystem:
 
     def handle_client(self, conn, addr):
         self._log(f'[{addr}] Client connected')
-        db_conn = None
         try:
-            db_conn = sqlite3.connect(self.db_path)
-            self._log(f'[{addr}] SQLite connection established for thread')
-
             while True:
                 data = conn.recv(1024)
                 if data:
@@ -227,25 +113,20 @@ class TransitSystem:
                     self._log(f'[{addr}] {msg}')
                     if not msg:
                         continue
-                    self.handle_command(addr, conn, db_conn, msg)
+                    self.handle_command(addr, conn, msg)
         except socket.error as e:
             self._log(f'[{addr}] Socket Error: {e}')
-        except sqlite3.Error as e:
-            self._log(f'[{addr}] Database Error: {e}')
         except Exception as e:
             self._log(f'[{addr}] Unexpected error: {e}')
         finally:
-            if db_conn:
-                db_conn.close()
-                self._log(f'[{addr}] SQLite connection closed for thread')
             conn.close()
             self._log(f'[{addr}] Client connection closed')
 
-    def handle_command(self, addr, sock_conn, db_conn, args):
+    def handle_command(self, addr, sock_conn, args):
         args = args.split('/')
         if len(args) < 2:
             self._log(f"[{addr}] Received invalid command: {args}")
-            sock_conn.sendall("ERROR/Invalid format, use `ID/COMMAND/*ARGS`")
+            sock_conn.sendall("ERROR/Invalid format, use `ID/COMMAND/*ARGS`".encode())
             return
 
         vid = args[0]
@@ -255,28 +136,27 @@ class TransitSystem:
         command = Command.COMMANDS.get(cmd_name)
         if not command:
             self._log(f"[{addr}] Received invalid command: {cmd_name}")
-            sock_conn.sendall(f"ERROR/Invalid command: {cmd_name}")
+            sock_conn.sendall(f"ERROR/Invalid command: {cmd_name}".encode())
+            return
 
         try:
-            cmd_instance = command(vid, sock_conn, db_conn, args)
-
+            cmd_instance = command(vid, sock_conn, self.db, args)  # Pass the Database instance
             self._log(f"[{addr}] Executed command: {cmd_name}")
             cmd_instance.execute()
         except Exception as e:
             self._log(f"[{addr}] Unexpected error while processing command: {e}")
 
 class Command(ABC):
-    COMMANDS: dict[str, type['Command']] = {}  #
+    COMMANDS: dict[str, type['Command']] = {}
     COMMAND_NAME: str | None = None
     ARGS_EXPECTED: int | None = None
     ARGS_MIN: int | None = None
-    def __init__(self, vid: str, sock_conn, db_conn, args: list[str]) -> None:
+
+    def __init__(self, vid: str, sock_conn, db: Database, args: list[str]) -> None:
         self.vid = vid
         self.sock_conn = sock_conn
-        self.db_conn = db_conn
+        self.db = db  # Use the SQLAlchemy-based Database instance
         self.args = args
-
-        self.cur = self.db_conn.cursor()
 
     def _log(self, *args):
         msg = " ".join(map(str, args))
@@ -299,7 +179,7 @@ class Command(ABC):
 
         if self.ARGS_MIN is not None:
             if len(self.args) < self.ARGS_MIN:
-                self._log(f'ERROR: Expected at least {self.ARGS_EXPECTED} arguments, got {len(self.args)}')
+                self._log(f'ERROR: Expected at least {self.ARGS_MIN} arguments, got {len(self.args)}')
                 return False
             return True
 
@@ -313,9 +193,6 @@ class Command(ABC):
 
         try:
             self._execute()
-        except sqlite3.Error as db_err:
-            self._log(f"Database error during execution: {db_err}")
-            self.send_response(f"ERROR:Database error")
         except Exception as e:
             self._log(f"Unexpected error during execution: {e}")
             self.send_response(f"ERROR:Internal server error")
@@ -326,6 +203,9 @@ class Command(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        
+        if cls is Command:
+            return
 
         if not cls.COMMAND_NAME:
             print('Command registration failed: no COMMAND_NAME')
@@ -338,8 +218,8 @@ class Command(ABC):
 class SessionCommand(Command):
     ARGS_MIN = 1
 
-    def __init__(self, vid: str, sock_conn, db_conn, args: list[str]) -> None:
-        super().__init__(vid, sock_conn, db_conn, args)
+    def __init__(self, vid: str, sock_conn, db: Database, args: list[str]) -> None:
+        super().__init__(vid, sock_conn, db, args)
         self.session_id: str | None = None
 
     def _validate_args(self) -> bool:
@@ -350,7 +230,7 @@ class SessionCommand(Command):
         extracted_session_id = self.args[0]
 
         self._log(f"Validating session ID: {extracted_session_id} for vehicle {self.vid}")
-        is_valid, validation_message = Database.validate_session(self.cur, extracted_session_id, self.vid)
+        is_valid, validation_message = self.db.validate_session(extracted_session_id, self.vid)
 
         if not is_valid:
             self._log(f"Session validation failed: {validation_message}")
@@ -365,12 +245,12 @@ class SessionCommand(Command):
         expected = self.__class__.ARGS_EXPECTED
         min = self.__class__.ARGS_MIN
         if expected is not None:
-             if len(self.args) != expected:
-                  err_msg = f"ERROR: {self.COMMAND_NAME} requires {expected} arguments after session ID, got {len(self.args)}."
-                  self._log(err_msg)
-                  self.send_response(err_msg)
-                  return False
-             self._log(f"Validated specific arg count ({expected}) for subclass.")
+            if len(self.args) != expected:
+                err_msg = f"ERROR: {self.COMMAND_NAME} requires {expected} arguments after session ID, got {len(self.args)}."
+                self._log(err_msg)
+                self.send_response(err_msg)
+                return False
+            self._log(f"Validated specific arg count ({expected}) for subclass.")
 
         if min is not None:
             if len(self.args) < min:
@@ -382,54 +262,47 @@ class SessionCommand(Command):
 
         return True
 
-    @abstractmethod
-    def _execute(self):
-        pass
-
-    def execute(self):
-         super().execute()
-
 class RegisterCommand(Command):
     COMMAND_NAME = "REGISTER"
 
     def _execute(self):
         vehicle_type = VehicleType(self.vid[0])
-        password = self.args[0] if len(self.args)>0 else None
+        password = self.args[0] if len(self.args) > 0 else None
 
         self._log(f'Checking DB for vehicle {self.vid}')
-        if Database.vehicle_exists(self.cur, self.vid):
+        if self.db.vehicle_exists(self.vid):
             self._log(f'Vehicle {self.vid} already registered.')
             self.send_response("EXISTS")
             return
 
         self._log(f'Registering vehicle {self.vid}...')
-        if Database.register_vehicle(self.db_conn, self.cur, self.vid, password, vehicle_type):
+        if self.db.register_vehicle(self.vid, password, vehicle_type.value):
             self._log(f'Vehicle registration successful: {self.vid}')
-            session = Database.create_session(self.db_conn, self.cur, self.vid)
+            session = self.db.create_session(self.vid)
             self.send_response(self.vid, session)
         else:
-             self._log(f'Vehicle registration failed for: {self.vid}')
-             self.send_response("ERROR/Registration failed")
+            self._log(f'Vehicle registration failed for: {self.vid}')
+            self.send_response("ERROR/Registration failed")
 
 class LoginCommand(Command):
     COMMAND_NAME = "LOGIN"
 
     def _execute(self):
-        password = self.args[0] if len(self.args)>0 else None
+        password = self.args[0] if len(self.args) > 0 else None
 
         self._log(f'Checking DB for vehicle {self.vid}')
-        if not Database.vehicle_exists(self.cur, self.vid):
+        if not self.db.vehicle_exists(self.vid):
             self._log(f'Vehicle {self.vid} is not registered.')
             self.send_response("UNREGISTERED/Please register your vehicle")
             return
 
-        if not Database.vehicle_password_correct(self.cur, self.vid, password):
+        if not self.db.vehicle_password_correct(self.vid, password):
             self._log(f'Invalid password')
             self.send_response("INVALID/Invalid vehicle id or password")
             return
 
         self._log(f'Login successful')
-        session = Database.create_session(self.db_conn, self.cur, self.vid)
+        session = self.db.create_session(self.vid)
         self.send_response(self.vid, session)
 
 class UpdateLocationCommand(SessionCommand):
@@ -438,9 +311,9 @@ class UpdateLocationCommand(SessionCommand):
 
     def _execute(self):
         if len(self.args) != 2:
-             self._log("Internal error: Incorrect number of args in _execute_logic.")
-             self.send_response("ERROR/Internal argument processing error")
-             return
+            self._log("Internal error: Incorrect number of args in _execute_logic.")
+            self.send_response("ERROR/Internal argument processing error")
+            return
 
         try:
             longitude = float(self.args[0])
@@ -452,14 +325,12 @@ class UpdateLocationCommand(SessionCommand):
 
         self._log(f"Attempting to record location ({longitude}, {latitude})")
 
-        if Database.record_location(self.db_conn, self.cur, self.vid, longitude, latitude):
+        if self.db.record_location(self.vid, longitude, latitude):
             self.send_response("OK/Location Updated")
         else:
             self.send_response("ERROR/Failed to update location in database")
 
-
 if __name__ == '__main__':
-    DATABASE_NAME = 'transit.db'
     SERVER_PORT = 8000
-    s = TransitSystem(DATABASE_NAME, SERVER_PORT)
+    s = TransitSystem(SERVER_PORT)
     s.start()
