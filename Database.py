@@ -1,7 +1,8 @@
-from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 import datetime
+import uuid
 
 # Define the base class for models
 Base = declarative_base()
@@ -19,7 +20,6 @@ SessionLocal = sessionmaker(bind=engine)
 class Vehicle(Base):
     __tablename__ = 'vehicles'
     vehicle_id = Column(String, primary_key=True)
-    vehicle_password = Column(String, nullable=False)
     vehicle_type = Column(String, nullable=False)
     status = Column(String, nullable=False, default="IDLE")
 
@@ -36,6 +36,35 @@ class Location(Base):
     longitude = Column(Float, nullable=False)
     latitude = Column(Float, nullable=False)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    
+class Place(Base):
+    __tablename__ = 'places'
+    place_id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+    max_capacity = Column(Integer, nullable=True)
+    stay_time_seconds = Column(Integer, nullable=True)
+    pass_through = Column(Boolean, default=False, nullable=False)
+
+    occupants = relationship("PlaceOccupancy", backref="place")
+
+    def __repr__(self):
+        return f"<Place(id={self.place_id}, name='{self.name}', type='{self.type}')>"
+
+
+class PlaceOccupancy(Base):
+    __tablename__ = 'place_occupancy'
+
+    occupancy_id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    vehicle_id = Column(String, nullable=False)  # e.g., "B101"
+    place_id = Column(String, ForeignKey('places.place_id'), nullable=False)
+    entered_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    leave_after = Column(DateTime, nullable=False)
+
+    def __repr__(self):
+        return f"<Occupancy(vehicle={self.vehicle_id}, place={self.place_id}, leave_after={self.leave_after})>"
 
 # Initialize the database
 def init_db():

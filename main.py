@@ -15,10 +15,6 @@ class Database:
     def vehicle_exists(self, vehicle_id: str) -> bool:
         return self.session.query(Vehicle).filter_by(vehicle_id=vehicle_id).first() is not None
 
-    def vehicle_password_correct(self, vehicle_id: str, password: str) -> bool:
-        vehicle = self.session.query(Vehicle).filter_by(vehicle_id=vehicle_id, vehicle_password=password).first()
-        return vehicle is not None
-
     def create_session(self, vehicle_id: str) -> str:
         session_id = str(uuid.uuid4())
         expires_at = datetime.datetime.now() + datetime.timedelta(hours=1)
@@ -51,9 +47,9 @@ class Database:
             print(f"Error recording location: {e}")
             return False
 
-    def register_vehicle(self, vehicle_id: str, vehicle_password: str, vehicle_type: str) -> bool:
+    def register_vehicle(self, vehicle_id: str, vehicle_type: str) -> bool:
         try:
-            new_vehicle = Vehicle(vehicle_id=vehicle_id, vehicle_password=vehicle_password, vehicle_type=vehicle_type)
+            new_vehicle = Vehicle(vehicle_id=vehicle_id, vehicle_type=vehicle_type)
             self.session.add(new_vehicle)
             self.session.commit()
             return True
@@ -203,17 +199,16 @@ class Command(ABC):
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        
-        if cls is Command:
-            return
 
-        if not cls.COMMAND_NAME:
-            print('Command registration failed: no COMMAND_NAME')
+        # Only register if it defines a command name
+        if cls.COMMAND_NAME is None:
+            print(f"Skipping command registration for {cls.__name__} (no COMMAND_NAME)")
             return
 
         name = cls.COMMAND_NAME.upper()
         print(f"Registering command: {name} -> {cls.__name__}")
         Command.COMMANDS[name] = cls
+
 
 class SessionCommand(Command):
     ARGS_MIN = 1
@@ -267,7 +262,6 @@ class RegisterCommand(Command):
 
     def _execute(self):
         vehicle_type = VehicleType(self.vid[0])
-        password = self.args[0] if len(self.args) > 0 else None
 
         self._log(f'Checking DB for vehicle {self.vid}')
         if self.db.vehicle_exists(self.vid):
@@ -276,7 +270,7 @@ class RegisterCommand(Command):
             return
 
         self._log(f'Registering vehicle {self.vid}...')
-        if self.db.register_vehicle(self.vid, password, vehicle_type.value):
+        if self.db.register_vehicle(self.vid, vehicle_type.value):
             self._log(f'Vehicle registration successful: {self.vid}')
             session = self.db.create_session(self.vid)
             self.send_response(self.vid, session)
@@ -288,17 +282,11 @@ class LoginCommand(Command):
     COMMAND_NAME = "LOGIN"
 
     def _execute(self):
-        password = self.args[0] if len(self.args) > 0 else None
 
         self._log(f'Checking DB for vehicle {self.vid}')
         if not self.db.vehicle_exists(self.vid):
             self._log(f'Vehicle {self.vid} is not registered.')
             self.send_response("UNREGISTERED/Please register your vehicle")
-            return
-
-        if not self.db.vehicle_password_correct(self.vid, password):
-            self._log(f'Invalid password')
-            self.send_response("INVALID/Invalid vehicle id or password")
             return
 
         self._log(f'Login successful')
