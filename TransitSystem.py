@@ -67,6 +67,7 @@ class TransitSystem:
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.tcp_socket.bind(('0.0.0.0', tcp_port))
         self.udp_socket.bind(('0.0.0.0', udp_port))
+        self.tcp_socket.settimeout(1.0)
         self.tcp_socket.listen(5)
         self._log(f'TCP Server listening on 0.0.0.0:{tcp_port}')
         self._log(f'UDP Server listening on 0.0.0.0:{udp_port}')
@@ -108,6 +109,10 @@ class TransitSystem:
         self.running = False
         self._log('Closing server...')
         try:
+            self.tcp_socket.shutdown(socket.SHUT_RDWR)
+        except (socket.error, OSError) as e:
+            self._log(f"Error during TCP socket shutdown (ignoring): {e}")
+        try:
             self.tcp_socket.close()
             self._log('TCP socket closed.')
         except Exception as e:
@@ -121,7 +126,7 @@ class TransitSystem:
 
         if self.udp_thread and self.udp_thread.is_alive():
              self._log("Waiting for UDP thread to finish...")
-             self.udp_thread.join(timeout=1.0)
+             self.udp_thread.join(timeout=2.0)
              if self.udp_thread.is_alive():
                  self._log("UDP thread did not finish cleanly.")
 
