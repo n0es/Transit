@@ -1,5 +1,5 @@
 # filepath: c:\Github\Transit\init_db.py
-from Database import get_db_session, Place,init_db
+from Database import get_db_session, Place, init_db, Routes
 
 def seed_places():
     session = get_db_session()
@@ -26,8 +26,30 @@ def seed_places():
     session.add_all(places)
     session.commit()
     print("Seeded 10 default places.")
+    
+def seed_routes():
+    session = get_db_session()
+
+    if session.query(Routes).first():
+        print("Routes already exist. Skipping.")
+        return
+
+    routes = [
+        Routes(vehicle_id="B101", step_index=0, place_id="P001"),
+        Routes(vehicle_id="B101", step_index=1, place_id="P003"),
+        Routes(vehicle_id="B101", step_index=2, place_id="P004"),
+
+        Routes(vehicle_id="B102", step_index=0, place_id="P002"),
+        Routes(vehicle_id="B102", step_index=1, place_id="P005"),
+        Routes(vehicle_id="B102", step_index=2, place_id="P006"),
+    ]
+
+    session.add_all(routes)
+    session.commit()
+    print("Seeded routes for B101 and B102.")
 
 if __name__ == "__main__":
     init_db()
     seed_places()
-    print("Database initialized and places seeded successfully.")
+    seed_routes()
+    print("Database initialized and places/routes seeded successfully.")

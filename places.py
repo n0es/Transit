@@ -4,18 +4,19 @@ from datetime import datetime, timedelta
 from Database import get_db_session, Place, PlaceOccupancy
 
 # Utility: Get a place by its ID
-def get_place_by_id(place_id: str) -> Place:
-    session = get_db_session()
-    return session.query(Place).filter_by(place_id=place_id).first()
+def get_place_by_id(place_id: str):
+    with get_db_session() as session:
+        return session.query(Place).filter_by(place_id=place_id).first()
 
 # Utility: Check if a place is full
 def is_place_full(place_id: str) -> bool:
     session = get_db_session()
     place = get_place_by_id(place_id)
     if not place or place.max_capacity is None:
-        return False  # If no capacity set, treat as unlimited
+        return False  # If no capacity is defined, the place is never full
 
     current = session.query(PlaceOccupancy).filter_by(place_id=place_id).count()
+    session.close()
     return current >= place.max_capacity
 
 # Vehicle tries to enter a place

@@ -3,6 +3,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 import datetime
 import uuid
+import logging
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 # Define the base class for models
 Base = declarative_base()
@@ -11,7 +13,7 @@ Base = declarative_base()
 DB_URL = "sqlite:///instance/main.db"
 
 # Create a single engine instance (thread-safe)
-engine = create_engine(DB_URL, echo=True)
+engine = create_engine(DB_URL, echo=False)
 
 # Create a configured "Session" class
 SessionLocal = sessionmaker(bind=engine)
@@ -21,6 +23,8 @@ class Vehicle(Base):
     __tablename__ = 'vehicles'
     vehicle_id = Column(String, primary_key=True)
     vehicle_type = Column(String, nullable=False)
+    latitude = Column(Float)
+    longitude = Column(Float)
     status = Column(String, nullable=False, default="IDLE")
 
 class Session(Base):
@@ -65,6 +69,16 @@ class PlaceOccupancy(Base):
 
     def __repr__(self):
         return f"<Occupancy(vehicle={self.vehicle_id}, place={self.place_id}, leave_after={self.leave_after})>"
+    
+class Routes(Base):
+    __tablename__ = 'routes'
+
+    vehicle_id = Column(String, primary_key=True)
+    step_index = Column(Integer, primary_key=True)  # 0, 1, 2, ...
+    place_id = Column(String, ForeignKey("places.place_id"), nullable=False)
+
+    def __repr__(self):
+        return f"<RouteStep(vehicle={self.vehicle_id}, step={self.step_index}, place={self.place_id})>"
 
 # Initialize the database
 def init_db():

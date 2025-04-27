@@ -1,11 +1,9 @@
 from abc import ABC, abstractmethod
 from Vehicle import VehicleType
 import threading
-import sqlite3
 import socket
 import uuid
 import datetime
-from sqlalchemy.orm import Session
 from Database import Vehicle, Session as DBSession, Location, get_db_session
 
 class Database:
@@ -295,12 +293,12 @@ class LoginCommand(Command):
 
 class UpdateLocationCommand(SessionCommand):
     COMMAND_NAME = "UPDATE_LOCATION"
-    EXPECTED_ARGS_COUNT = 2
+    ARGS_MIN = 2  # Minimum args: lat, lon
 
     def _execute(self):
-        if len(self.args) != 2:
-            self._log("Internal error: Incorrect number of args in _execute_logic.")
-            self.send_response("ERROR/Internal argument processing error")
+        if len(self.args) < 2:
+            self._log("Invalid number of arguments for UPDATE_LOCATION.")
+            self.send_response("ERROR/Invalid arguments")
             return
 
         try:
@@ -311,9 +309,18 @@ class UpdateLocationCommand(SessionCommand):
             self.send_response("ERROR/Invalid location format. Longitude/Latitude must be numbers.")
             return
 
-        self._log(f"Attempting to record location ({longitude}, {latitude})")
+        status = self.args[2] if len(self.args) > 2 else None
+
+        self._log(f"Updating location for {self.vid}: ({latitude}, {longitude}), Status: {status}")
 
         if self.db.record_location(self.vid, longitude, latitude):
+            vehicle = self.db.session.query(Vehicle).filter_by(vehicle_id=self.vid).first()
+            if vehicle:
+                vehicle.latitude = latitude
+                vehicle.longitude = longitude
+                if status:
+                    vehicle.status = status
+                self.db.session.commit()
             self.send_response("OK/Location Updated")
         else:
             self.send_response("ERROR/Failed to update location in database")
