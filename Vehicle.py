@@ -1,9 +1,11 @@
+#Vehicle.py
 from typing import Tuple, Dict
 from enum import Enum
 import threading
 import socket
+from Database import get_db_session, Routes
 import time
-import random
+from places import get_place_by_id, try_enter_place, remove_vehicle_from_place, is_place_full
 
 class VehicleType(Enum):
     TRAIN = "T"
@@ -25,19 +27,16 @@ class Vehicle:
         self.type = type
         if self.id[0]!=type.value:
             raise ValueError(f"Vehicle ID must correlate with vehicle type!\nID = {self.id}\nType = {self.type.value}")
+        self.client = None
 
-        self.server_tcp_addr = server_addr
-        self.server_udp_addr = (server_addr[0], udp_port)
-
-        self.tcp_client: socket.socket | None = None
-        self.udp_client: socket.socket | None = None
-        self.beacon_thread: threading.Thread | None = None
-        self.beacon_interval: int = 10
-
-        self.current_latitude: float = 40.7 + random.uniform(-0.05, 0.05)
-        self.current_longitude: float = -74.0 + random.uniform(-0.05, 0.05)
-
-        self.connect(server_addr)
+        self.connect(addr)
+        
+        self.route = []  # List of place IDs in the route
+        self.current_index = 0  # Current step in the route
+        self.state = "IDLE"  # IDLE, MOVING, WAITING, DELAYED, FINISHED
+        self.lat = 0.0  # Current latitude
+        self.lon = 0.0  # Current longitude
+        self.delayed = False  # Whether the vehicle is delayed
 
     def _log(self, msg: str) -> None:
         print(self.id + " | " + msg)
@@ -157,10 +156,8 @@ class Vehicle:
             except socket.error as e:
                 self._log(f"Error closing UDP socket: {e}")
             finally:
-                self.udp_client = None
-
-        self._log("Vehicle closed.")
-
+                 self.client = None
+                 
     def run(self) -> None:
         if not self.tcp_client:
             self._log("Cannot run: Not connected.")
@@ -172,6 +169,14 @@ class Vehicle:
             self._log("Startup failed: Could not establish session.")
             self.close()
             return
+
+        self.load_route_from_db()
+        if not self.route:
+            self._log("No route found. Vehicle will remain idle.")
+            return
+
+        self._log(f"Starting at position: ({self.lat}, {self.lon})")
+        threading.Thread(target=self.run_route_loop, daemon=True).start()
 
         self.is_running = True
 
@@ -293,12 +298,158 @@ class Vehicle:
         finally:
             self.close()
             self._log("Command line closed.")
+            
+    def update_server_status(self):
+        if self.session:
+            payload = f"UPDATE_LOCATION/{self.session}/{self.lat:.6f}/{self.lon:.6f}/{self.state}"
+            self.send(payload)
+            
+    def is_position_occupied(self, lat: float, lon: float) -> bool:
+        session = get_db_session()
+        try:
+            count = session.query(Vehicle).filter(
+                Vehicle.vehicle_id != self.id,
+                abs(Vehicle.latitude - lat) < 0.0001,
+                abs(Vehicle.longitude - lon) < 0.0001
+            ).count()
+            return count > 0
+        finally:
+            session.close()
+            
+    def load_route_from_db(self) -> None:
+        """Load the route for this vehicle from the database."""
+        session = get_db_session()
+        route_steps = (
+            session.query(Routes)
+            .filter_by(vehicle_id=self.id)
+            .order_by(Routes.step_index)
+            .all()
+        )
+        self.route = [step.place_id for step in route_steps]
+        self._log(f"Loaded route: {self.route}")
 
+    def run_route_loop(self) -> None:
+        """Continuously move along the route."""
+        self._log("Starting run_route_loop()")
+        while self.is_running:
+            if self.state == "IDLE" and self.route:
+                next_place_id = self.route[self.current_index]
+                next_place = get_place_by_id(next_place_id)
+                if not next_place:
+                    self._log(f"Error: Place {next_place_id} not found.")
+                    self.state = "IDLE"
+                    continue
 
+                # Preemptive check for place capacity
+                if not next_place.pass_through and is_place_full(next_place_id):
+                    self._log(f"{next_place_id} is full. Waiting before approaching.")
+                    self.state = "DELAYED"
+                    self.update_server_status()
+                    time.sleep(1)
+                    continue
+
+                self._log(f"Moving to {next_place_id} ({next_place.latitude}, {next_place.longitude})")
+                self.state = "MOVING"
+                self.update_server_status()
+
+            elif self.state == "MOVING":
+                next_place_id = self.route[self.current_index]
+                next_place = get_place_by_id(next_place_id)
+
+                if not next_place:
+                    self._log(f"Error: Place {next_place_id} not found.")
+                    self.state = "IDLE"
+                    continue
+
+                # Calculate the next step toward the target
+                new_lat = self.lat + (next_place.latitude - self.lat) * 0.1
+                new_lon = self.lon + (next_place.longitude - self.lon) * 0.1
+
+                # Check for positional congestion
+                if self.is_position_occupied(new_lat, new_lon):
+                    self._log(f"Blocked by vehicle ahead at ({new_lat:.6f}, {new_lon:.6f}). Waiting...")
+                    self.state = "DELAYED"
+                    self.update_server_status()
+                    time.sleep(1)
+                    continue
+
+                # Update position
+                self.lat = new_lat
+                self.lon = new_lon
+                self._log(f"Current location: ({self.lat:.6f}, {self.lon:.6f})")
+                self.update_server_status()
+
+                # Distance-based arrival detection
+                def euclidean_dist(lat1, lon1, lat2, lon2):
+                    return ((lat1 - lat2)**2 + (lon1 - lon2)**2) ** 0.5
+
+                if euclidean_dist(self.lat, self.lon, next_place.latitude, next_place.longitude) < 0.00005:
+                    self._log(f"Arrived at {next_place_id}")
+                    success, status = try_enter_place(self.id, next_place_id)
+                    if success:
+                        self._log(f"Entered {next_place_id}: {status}")
+
+                        if next_place.pass_through:
+                            self._log(f"{next_place_id} is a pass-through. Skipping wait.")
+                            remove_vehicle_from_place(self.id)
+                            self.current_index += 1
+                            if self.current_index >= len(self.route):
+                                self.state = "FINISHED"
+                                self._log("Route complete. Vehicle finished.")
+                                self.update_server_status()
+                                break
+                            else:
+                                self.state = "IDLE"
+                                self.update_server_status()
+                        else:
+                            self.state = "WAITING"
+                            self.update_server_status()
+                            time.sleep(next_place.stay_time_seconds or 60)
+                            remove_vehicle_from_place(self.id)
+                            self._log(f"Leaving {next_place_id}")
+                            self.current_index += 1
+                            if self.current_index >= len(self.route):
+                                self.state = "FINISHED"
+                                self._log("Route complete. Vehicle finished.")
+                                self.update_server_status()
+                                break
+                            else:
+                                self.state = "IDLE"
+                                self.update_server_status()
+                    else:
+                        self._log(f"Failed to enter {next_place_id}: {status}")
+                        self.delayed = True
+                        self.state = "DELAYED"
+                        self.update_server_status()
+                        time.sleep(5)
+                        self.delayed = False
+                        self.state = "MOVING"
+                        self.update_server_status()
+
+            time.sleep(1)
+            
 if __name__ == '__main__':
-    SERVER_ADDRESS = "localhost"
-    TCP_SERVER_PORT = 8000
-    UDP_SERVER_PORT = 8001
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python Vehicle.py <vehicle_id>")
+        exit(1)
 
-    v = Vehicle("B101", VehicleType.BUS, (SERVER_ADDRESS, TCP_SERVER_PORT), UDP_SERVER_PORT)
+    vehicle_id = sys.argv[1]
+    SERVER_ADDRESS = "localhost"
+    SERVER_PORT = 8000
+    
+    prefix_map = {
+        "B": VehicleType.BUS,
+        "U": VehicleType.UBER,
+        "S": VehicleType.SHUTTLE,
+        "T": VehicleType.TRAIN,
+    }
+
+    vtype = prefix_map.get(vehicle_id[0].upper())
+    if not vtype:
+        print(f"Unknown vehicle type for ID: {vehicle_id}")
+        exit(1)
+
+    v = Vehicle(vehicle_id, vtype, (SERVER_ADDRESS, SERVER_PORT))
     v.run()
+
