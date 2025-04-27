@@ -1,0 +1,5 @@
+sqlalchemy>=2.0.40
+tkintermapview==1.29
+Pillow>=10.0.0 # For custom marker icons
+
+# Use the latest version from PyPI 
