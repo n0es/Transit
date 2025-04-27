@@ -1,13 +1,12 @@
+from Database import Vehicle, Session as DBSession, Location, get_db_session, init_db, DB_URL
 from abc import ABC, abstractmethod
 from Vehicle import VehicleType
 import threading
-import sqlite3
+import datetime
 import socket
 import uuid
-import datetime
 import time
-from sqlalchemy.orm import Session
-from Database import Vehicle, Session as DBSession, Location, get_db_session
+import os
 
 class Database:
     def __init__(self):
@@ -61,16 +60,29 @@ class Database:
 
 
 class TransitSystem:
-    def __init__(self, tcp_port: int, udp_port: int):
+    def __init__(self, addr: str, tcp_port: int, udp_port: int):
+        # --- Database Initialization Check ---
+        # Extract the path from the DB_URL (sqlite:///instance/main.db -> instance/main.db)
+        db_path = DB_URL.split("///")[-1]
+        if not os.path.exists(db_path):
+            self._log(f"Database file not found at {db_path}. Initializing database...")
+            # Ensure the instance directory exists
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            init_db()
+            self._log("Database initialized.")
+        else:
+            self._log(f"Database file found at {db_path}.")
+        # --- End Database Check ---
+
         self.db = Database()
         self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.tcp_socket.bind(('0.0.0.0', tcp_port))
-        self.udp_socket.bind(('0.0.0.0', udp_port))
+        self.tcp_socket.bind((addr, tcp_port))
+        self.udp_socket.bind((addr, udp_port))
         self.tcp_socket.settimeout(1.0)
         self.tcp_socket.listen(5)
-        self._log(f'TCP Server listening on 0.0.0.0:{tcp_port}')
-        self._log(f'UDP Server listening on 0.0.0.0:{udp_port}')
+        self._log(f'TCP Server listening on {addr}:{tcp_port}')
+        self._log(f'UDP Server listening on {addr}:{udp_port}')
 
         self.running = False
         self.udp_thread = None
@@ -358,9 +370,10 @@ class LoginCommand(Command):
         self._log(f'Login successful')
         session = self.db.create_session(self.vid)
         self.send_response(self.vid, session)
-
+        
 if __name__ == '__main__':
+    addr = 'localhost'
     TCP_SERVER_PORT = 8000
     UDP_SERVER_PORT = 8001
-    s = TransitSystem(TCP_SERVER_PORT, UDP_SERVER_PORT)
+    s = TransitSystem(addr, TCP_SERVER_PORT, UDP_SERVER_PORT)
     s.start()

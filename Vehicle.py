@@ -1,11 +1,11 @@
-#Vehicle.py
+from places import get_place_by_id, try_enter_place, remove_vehicle_from_place, is_place_full
+from Database import get_db_session, Routes
 from typing import Tuple, Dict
 from enum import Enum
 import threading
 import socket
-from Database import get_db_session, Routes
+import random
 import time
-from places import get_place_by_id, try_enter_place, remove_vehicle_from_place, is_place_full
 
 class VehicleType(Enum):
     TRAIN = "T"
@@ -19,7 +19,7 @@ class Vehicle:
         "REGISTER": False,
         "LOGIN": False,
     }
-    def __init__(self, id: str, type: VehicleType, server_addr: Tuple[str, int], udp_port: int, password: str = None, session: str = None) -> None:
+    def __init__(self, id: str, type: VehicleType, addr: str, tcp_port: int, udp_port: int, password: str = None, session: str = None) -> None:
         self.is_running = False
         self.id = id
         self.password = password
@@ -29,7 +29,15 @@ class Vehicle:
             raise ValueError(f"Vehicle ID must correlate with vehicle type!\nID = {self.id}\nType = {self.type.value}")
         self.client = None
 
-        self.connect(addr)
+        self.server_tcp_addr = (addr, tcp_port)
+        self.server_udp_addr = (addr, udp_port)
+
+        self.tcp_client: socket.socket | None = None
+        self.udp_client: socket.socket | None = None
+        self.beacon_thread: threading.Thread | None = None
+        self.beacon_interval: int = 10
+
+        self.connect(self.server_tcp_addr)
         
         self.route = []  # List of place IDs in the route
         self.current_index = 0  # Current step in the route
@@ -436,7 +444,8 @@ if __name__ == '__main__':
 
     vehicle_id = sys.argv[1]
     SERVER_ADDRESS = "localhost"
-    SERVER_PORT = 8000
+    SERVER_TCP_PORT = 8000
+    SERVER_UDP_PORT = 8001
     
     prefix_map = {
         "B": VehicleType.BUS,
@@ -450,6 +459,6 @@ if __name__ == '__main__':
         print(f"Unknown vehicle type for ID: {vehicle_id}")
         exit(1)
 
-    v = Vehicle(vehicle_id, vtype, (SERVER_ADDRESS, SERVER_PORT))
+    v = Vehicle(vehicle_id, vtype, SERVER_ADDRESS, SERVER_TCP_PORT, SERVER_UDP_PORT)
     v.run()
 
